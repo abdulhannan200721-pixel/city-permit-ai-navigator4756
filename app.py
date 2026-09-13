@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 import tempfile
 import streamlit as st
@@ -7,27 +6,16 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any
 
-# ---------------------------------------------------------
-# Safe Imports & Namespace Resolutions
-# ---------------------------------------------------------
 # Ensure FAISS loads cleanly
 try:
     import faiss
 except ModuleNotFoundError:
     st.error("❌ FAISS module not found. Please ensure `faiss-cpu` is in requirements.txt and `libomp-dev` is in packages.txt.")
 
-# Force namespace resolution for google-genai on Streamlit Cloud
-if "google" in sys.modules:
-    del sys.modules["google"]
-
-try:
-    import google.genai as genai
-    from google.genai import types
-    from google.genai.errors import ServerError, ClientError
-except ModuleNotFoundError:
-    from google import genai
-    from google.genai import types
-    from google.genai.errors import ServerError, ClientError
+# Standard Google GenAI SDK imports
+from google import genai
+from google.genai import types
+from google.genai.errors import ServerError, ClientError
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -101,7 +89,7 @@ class GeminiEmbeddings:
             )
             return [emb.values for emb in response.embeddings]
         except Exception:
-            # Fallback embedding model
+            # Automatic fallback model
             response = self.client.models.embed_content(
                 model="gemini-embedding-001",
                 contents=texts,
