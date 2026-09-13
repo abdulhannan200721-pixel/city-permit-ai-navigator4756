@@ -1,3 +1,2 @@
 libomp-dev
-libopenblas-dev
-libomp-dev
+
