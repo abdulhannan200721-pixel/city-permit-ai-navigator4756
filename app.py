@@ -3,7 +3,6 @@ import time
 import tempfile
 import streamlit as st
 import numpy as np
-import faiss
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -30,7 +29,7 @@ st.caption("Upload municipal PDF/TXT documents, build a vector store, and analyz
 api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 if not api_key:
-    st.error("⚠️ `GEMINI_API_KEY` نہیں ملی! برائے مہربانی Streamlit Secrets یا Environment Variables میں Key شامل کریں۔")
+    st.error("⚠️ GEMINI_API_KEY not found! Please configure it in Streamlit Secrets or Environment Variables.")
     st.stop()
 
 # ---------------------------------------------------------
@@ -81,8 +80,8 @@ class GeminiEmbeddings:
                 config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
             )
             return [emb.values for emb in response.embeddings]
-        except Exception as e:
-            # Automatic fallback model
+        except Exception:
+            # Fallback embedding model if primary fails
             response = self.client.models.embed_content(
                 model="gemini-embedding-001",
                 contents=texts,
@@ -107,29 +106,38 @@ class GeminiEmbeddings:
             return response.embeddings[0].values
 
 
-class FAISSVectorStore:
+class NumpyVectorStore:
+    """Pure Python / NumPy Vector Store - eliminates C++ dependencies like FAISS."""
     def __init__(self, embeddings: GeminiEmbeddings):
         self.embeddings = embeddings
-        self.index = None
+        self.vectors = None
         self.metadata = []
 
     def build(self, chunks: List[Dict[str, Any]]):
         texts = [c["content"] for c in chunks]
         self.metadata = chunks
         raw_embs = self.embeddings.embed_documents(texts)
-        embs_np = np.array(raw_embs, dtype=np.float32)
         
-        self.index = faiss.IndexFlatL2(embs_np.shape[1])
-        self.index.add(embs_np)
+        # Normalize vectors for fast cosine similarity dot product
+        embs_np = np.array(raw_embs, dtype=np.float32)
+        norms = np.linalg.norm(embs_np, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        self.vectors = embs_np / norms
 
     def search(self, query: str, top_k=3) -> List[Dict[str, Any]]:
-        q_emb = np.array([self.embeddings.embed_query(query)], dtype=np.float32)
-        distances, indices = self.index.search(q_emb, top_k)
-        return [self.metadata[i] for i in indices[0] if i != -1]
+        q_emb = np.array(self.embeddings.embed_query(query), dtype=np.float32)
+        q_norm = np.linalg.norm(q_emb)
+        if q_norm > 0:
+            q_emb = q_emb / q_norm
+            
+        similarities = np.dot(self.vectors, q_emb)
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        
+        return [self.metadata[i] for i in top_indices]
 
 
 class MunicipalRAGChain:
-    def __init__(self, vector_store: FAISSVectorStore, api_key: str):
+    def __init__(self, vector_store: NumpyVectorStore, api_key: str):
         self.vector_store = vector_store
         self.client = genai.Client(api_key=api_key)
 
@@ -170,7 +178,7 @@ class MunicipalRAGChain:
                         )
                     )
                     return response.text, retrieved_chunks
-                except (ServerError, ClientError) as e:
+                except (ServerError, ClientError):
                     time.sleep(1)
 
         raise RuntimeError("Failed to query Gemini API after trying candidate models.")
@@ -204,7 +212,7 @@ if uploaded_files and st.sidebar.button("⚙️ Process Documents & Build Index"
             chunks = splitter.split_documents(docs)
 
             embeddings = GeminiEmbeddings(api_key=api_key)
-            vector_store = FAISSVectorStore(embeddings)
+            vector_store = NumpyVectorStore(embeddings)
             vector_store.build(chunks)
 
             st.session_state.vector_store = vector_store
