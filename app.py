@@ -6,7 +6,8 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any
 
-from google import genai
+# Correct google-genai SDK import structure
+import google.genai as genai
 from google.genai import types
 from google.genai.errors import ServerError, ClientError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -81,7 +82,6 @@ class GeminiEmbeddings:
             )
             return [emb.values for emb in response.embeddings]
         except Exception:
-            # Fallback embedding model if primary fails
             response = self.client.models.embed_content(
                 model="gemini-embedding-001",
                 contents=texts,
@@ -107,7 +107,7 @@ class GeminiEmbeddings:
 
 
 class NumpyVectorStore:
-    """Pure Python / NumPy Vector Store - eliminates C++ dependencies like FAISS."""
+    """Pure Python / NumPy Vector Store to eliminate FAISS dependencies."""
     def __init__(self, embeddings: GeminiEmbeddings):
         self.embeddings = embeddings
         self.vectors = None
@@ -118,7 +118,6 @@ class NumpyVectorStore:
         self.metadata = chunks
         raw_embs = self.embeddings.embed_documents(texts)
         
-        # Normalize vectors for fast cosine similarity dot product
         embs_np = np.array(raw_embs, dtype=np.float32)
         norms = np.linalg.norm(embs_np, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
