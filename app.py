@@ -4,13 +4,20 @@ import time
 import tempfile
 import streamlit as st
 import numpy as np
-import faiss
 from pathlib import Path
 from typing import List, Dict, Any
 
+# ---------------------------------------------------------
+# Safe Imports & Namespace Resolutions
+# ---------------------------------------------------------
+# Ensure FAISS loads cleanly
+try:
+    import faiss
+except ModuleNotFoundError:
+    st.error("❌ FAISS module not found. Please ensure `faiss-cpu` is in requirements.txt and `libomp-dev` is in packages.txt.")
+
 # Force namespace resolution for google-genai on Streamlit Cloud
 if "google" in sys.modules:
-    # Clear cached base google module to resolve namespace collision
     del sys.modules["google"]
 
 try:
@@ -23,6 +30,9 @@ except ModuleNotFoundError:
     from google.genai.errors import ServerError, ClientError
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# ---------------------------------------------------------
+# Page Configuration
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Municipal Legal Code & Permit Navigator",
@@ -31,7 +41,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ Municipal Legal Code & Permit Navigator")
-st.caption("Upload municipal PDF/TXT documents, build a vector store, and analyze compliance using Gemini.")
+st.caption("Upload municipal TXT documents, build a vector store, and analyze compliance using Gemini.")
 
 # ---------------------------------------------------------
 # API Key Setup
@@ -39,7 +49,7 @@ st.caption("Upload municipal PDF/TXT documents, build a vector store, and analyz
 api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 if not api_key:
-    st.error("⚠️ GEMINI_API_KEY not found! Please configure it in Streamlit Secrets or Environment Variables.")
+    st.error("⚠️ `GEMINI_API_KEY` is missing! Please set your API key in Streamlit Secrets or Environment Variables.")
     st.stop()
 
 # ---------------------------------------------------------
@@ -91,6 +101,7 @@ class GeminiEmbeddings:
             )
             return [emb.values for emb in response.embeddings]
         except Exception:
+            # Fallback embedding model
             response = self.client.models.embed_content(
                 model="gemini-embedding-001",
                 contents=texts,
@@ -115,37 +126,29 @@ class GeminiEmbeddings:
             return response.embeddings[0].values
 
 
-class NumpyVectorStore:
-    """Pure Python / NumPy Vector Store to eliminate FAISS C++ dependencies."""
+class FAISSVectorStore:
     def __init__(self, embeddings: GeminiEmbeddings):
         self.embeddings = embeddings
-        self.vectors = None
+        self.index = None
         self.metadata = []
 
     def build(self, chunks: List[Dict[str, Any]]):
         texts = [c["content"] for c in chunks]
         self.metadata = chunks
         raw_embs = self.embeddings.embed_documents(texts)
-        
         embs_np = np.array(raw_embs, dtype=np.float32)
-        norms = np.linalg.norm(embs_np, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        self.vectors = embs_np / norms
+        
+        self.index = faiss.IndexFlatL2(embs_np.shape[1])
+        self.index.add(embs_np)
 
     def search(self, query: str, top_k=3) -> List[Dict[str, Any]]:
-        q_emb = np.array(self.embeddings.embed_query(query), dtype=np.float32)
-        q_norm = np.linalg.norm(q_emb)
-        if q_norm > 0:
-            q_emb = q_emb / q_norm
-            
-        similarities = np.dot(self.vectors, q_emb)
-        top_indices = np.argsort(similarities)[::-1][:top_k]
-        
-        return [self.metadata[i] for i in top_indices]
+        q_emb = np.array([self.embeddings.embed_query(query)], dtype=np.float32)
+        distances, indices = self.index.search(q_emb, top_k)
+        return [self.metadata[i] for i in indices[0] if i != -1]
 
 
 class MunicipalRAGChain:
-    def __init__(self, vector_store: NumpyVectorStore, api_key: str):
+    def __init__(self, vector_store: FAISSVectorStore, api_key: str):
         self.vector_store = vector_store
         self.client = genai.Client(api_key=api_key)
 
@@ -220,7 +223,7 @@ if uploaded_files and st.sidebar.button("⚙️ Process Documents & Build Index"
             chunks = splitter.split_documents(docs)
 
             embeddings = GeminiEmbeddings(api_key=api_key)
-            vector_store = NumpyVectorStore(embeddings)
+            vector_store = FAISSVectorStore(embeddings)
             vector_store.build(chunks)
 
             st.session_state.vector_store = vector_store
