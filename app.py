@@ -1,18 +1,28 @@
 import os
+import sys
 import time
 import tempfile
 import streamlit as st
 import numpy as np
+import faiss
 from pathlib import Path
 from typing import List, Dict, Any
 
-from google import genai
-from google.genai import types
-from google.genai.errors import ServerError, ClientError
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+# Force namespace resolution for google-genai on Streamlit Cloud
+if "google" in sys.modules:
+    # Clear cached base google module to resolve namespace collision
+    del sys.modules["google"]
 
-# ---------------------------------------------------------
-# Page Configuration
+try:
+    import google.genai as genai
+    from google.genai import types
+    from google.genai.errors import ServerError, ClientError
+except ModuleNotFoundError:
+    from google import genai
+    from google.genai import types
+    from google.genai.errors import ServerError, ClientError
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Municipal Legal Code & Permit Navigator",
