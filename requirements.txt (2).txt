@@ -1,5 +1,4 @@
 streamlit>=1.35.0
-google-genai>=0.1.0
-faiss-cpu-no-avx2
+google-genai==0.1.1
 langchain-text-splitters>=0.0.1
 numpy>=1.24.0
