@@ -6,8 +6,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any
 
-# Correct google-genai SDK import structure
-import google.genai as genai
+from google import genai
 from google.genai import types
 from google.genai.errors import ServerError, ClientError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -107,7 +106,7 @@ class GeminiEmbeddings:
 
 
 class NumpyVectorStore:
-    """Pure Python / NumPy Vector Store to eliminate FAISS dependencies."""
+    """Pure Python / NumPy Vector Store to eliminate FAISS C++ dependencies."""
     def __init__(self, embeddings: GeminiEmbeddings):
         self.embeddings = embeddings
         self.vectors = None
