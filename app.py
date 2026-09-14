@@ -3,33 +3,29 @@ import time
 import tempfile
 import streamlit as st
 import numpy as np
+import faiss
 from pathlib import Path
 from typing import List, Dict, Any
 
-# Ensure FAISS loads cleanly
-try:
-    import faiss
-except ModuleNotFoundError:
-    st.error("❌ FAISS module not found. Please ensure `faiss-cpu` is in requirements.txt and `libomp-dev` is in packages.txt.")
+from pypdf import PdfReader
+from docx import Document as DocxDocument
 
-# Standard Google GenAI SDK imports
 from google import genai
 from google.genai import types
 from google.genai.errors import ServerError, ClientError
-
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ---------------------------------------------------------
 # Page Configuration
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Municipal Legal Code & Permit Navigator",
+    page_title="Municipal Permit Navigator PRO",
     page_icon="⚖️",
     layout="wide"
 )
 
-st.title("⚖️ Municipal Legal Code & Permit Navigator")
-st.caption("Upload municipal TXT documents, build a vector store, and analyze compliance using Gemini.")
+st.title("⚖️ Municipal Legal Code & Permit Navigator (PRO)")
+st.caption("Upload Municipal PDFs, TXTs, or DOCX files to analyze compliance instantly.")
 
 # ---------------------------------------------------------
 # API Key Setup
@@ -37,30 +33,51 @@ st.caption("Upload municipal TXT documents, build a vector store, and analyze co
 api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 if not api_key:
-    st.error("⚠️ `GEMINI_API_KEY` is missing! Please set your API key in Streamlit Secrets or Environment Variables.")
+    st.error("⚠️ `GEMINI_API_KEY` missing! Please add it to Streamlit Secrets.")
     st.stop()
 
 # ---------------------------------------------------------
-# RAG Backend Classes
+# Multi-Format Document Loader
 # ---------------------------------------------------------
-class DocumentLoader:
+class UniversalDocumentLoader:
     def __init__(self, data_path: Path):
         self.data_path = data_path
 
     def load_documents(self) -> List[Dict[str, Any]]:
         docs = []
         for file in self.data_path.glob("*"):
-            if file.suffix.lower() == ".txt":
-                with open(file, "r", encoding="utf-8") as f:
-                    docs.append({
-                        "content": f.read(),
-                        "metadata": {"document_name": file.name, "page_number": 1}
-                    })
+            ext = file.suffix.lower()
+            text = ""
+            
+            if ext == ".txt":
+                with open(file, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            elif ext == ".pdf":
+                reader = PdfReader(file)
+                for page_num, page in enumerate(reader.pages):
+                    page_text = page.extract_text()
+                    if page_text:
+                        docs.append({
+                            "content": page_text,
+                            "metadata": {"document_name": file.name, "page_number": page_num + 1}
+                        })
+                continue
+            elif ext == ".docx":
+                doc = DocxDocument(file)
+                text = "\n".join([p.text for p in doc.paragraphs if p.text])
+
+            if text.strip():
+                docs.append({
+                    "content": text,
+                    "metadata": {"document_name": file.name, "page_number": 1}
+                })
         return docs
 
-
+# ---------------------------------------------------------
+# Splitter & Embeddings
+# ---------------------------------------------------------
 class RegulatoryTextSplitter:
-    def __init__(self, chunk_size=500, chunk_overlap=100):
+    def __init__(self, chunk_size=600, chunk_overlap=120):
         self.splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     def split_documents(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -89,7 +106,6 @@ class GeminiEmbeddings:
             )
             return [emb.values for emb in response.embeddings]
         except Exception:
-            # Automatic fallback model
             response = self.client.models.embed_content(
                 model="gemini-embedding-001",
                 contents=texts,
@@ -129,7 +145,7 @@ class FAISSVectorStore:
         self.index = faiss.IndexFlatL2(embs_np.shape[1])
         self.index.add(embs_np)
 
-    def search(self, query: str, top_k=3) -> List[Dict[str, Any]]:
+    def search(self, query: str, top_k=4) -> List[Dict[str, Any]]:
         q_emb = np.array([self.embeddings.embed_query(query)], dtype=np.float32)
         distances, indices = self.index.search(q_emb, top_k)
         return [self.metadata[i] for i in indices[0] if i != -1]
@@ -141,7 +157,7 @@ class MunicipalRAGChain:
         self.client = genai.Client(api_key=api_key)
 
     def run_query(self, user_prompt: str, business_info: str):
-        retrieved_chunks = self.vector_store.search(user_prompt, top_k=3)
+        retrieved_chunks = self.vector_store.search(user_prompt, top_k=4)
         
         context_str = "\n---\n".join([
             f"[Source: {c['metadata']['document_name']} | Page {c['metadata']['page_number']}]\n{c['content']}"
@@ -149,20 +165,21 @@ class MunicipalRAGChain:
         ])
 
         system_instruction = """
-        You are a Municipal Legal Code & Permit Navigator.
+        You are a Municipal Legal Code & Permit Navigator PRO.
         Rely ONLY on the retrieved official sources below.
         Do NOT invent laws, fees, or requirements. 
         If info is missing, explicitly state: "Your uploaded official sources do not provide enough information to confirm this requirement."
         Provide source citations for every statement.
+        Format your output cleanly with bullet points, fees table (if applicable), and clear action steps.
         """
 
         prompt = f"Business Profile:\n{business_info}\n\nRetrieved Official Documents:\n{context_str}\n\nQuery: {user_prompt}"
 
         candidate_models = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
+            "gemini-2.5-flash",
             "gemini-2.0-flash",
-            "gemini-2.5-flash"
+            "gemini-1.5-flash",
+            "gemini-1.5-pro"
         ]
 
         for model in candidate_models:
@@ -178,17 +195,17 @@ class MunicipalRAGChain:
                     )
                     return response.text, retrieved_chunks
                 except (ServerError, ClientError):
-                    time.sleep(1)
+                    time.sleep(0.5)
 
         raise RuntimeError("Failed to query Gemini API after trying candidate models.")
 
 # ---------------------------------------------------------
-# Sidebar - Upload & Setup
+# Sidebar - Document Upload
 # ---------------------------------------------------------
-st.sidebar.header("📁 Document Ingestion")
+st.sidebar.header("📂 Document Ingestion (PRO)")
 uploaded_files = st.sidebar.file_uploader(
-    "Upload Official Municipal Text Files (.txt)",
-    type=["txt"],
+    "Upload Official Files (.txt, .pdf, .docx)",
+    type=["txt", "pdf", "docx"],
     accept_multiple_files=True
 )
 
@@ -196,7 +213,7 @@ if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 
 if uploaded_files and st.sidebar.button("⚙️ Process Documents & Build Index"):
-    with st.spinner("Processing files and generating embeddings..."):
+    with st.spinner("Processing multi-format documents and building vector store..."):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
             for uploaded_file in uploaded_files:
@@ -204,10 +221,10 @@ if uploaded_files and st.sidebar.button("⚙️ Process Documents & Build Index"
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
-            loader = DocumentLoader(temp_path)
+            loader = UniversalDocumentLoader(temp_path)
             docs = loader.load_documents()
 
-            splitter = RegulatoryTextSplitter(chunk_size=500, chunk_overlap=100)
+            splitter = RegulatoryTextSplitter(chunk_size=600, chunk_overlap=120)
             chunks = splitter.split_documents(docs)
 
             embeddings = GeminiEmbeddings(api_key=api_key)
@@ -215,7 +232,7 @@ if uploaded_files and st.sidebar.button("⚙️ Process Documents & Build Index"
             vector_store.build(chunks)
 
             st.session_state.vector_store = vector_store
-            st.sidebar.success(f"✅ Ingested {len(docs)} documents into {len(chunks)} chunks!")
+            st.sidebar.success(f"✅ Indexed {len(docs)} document sections into {len(chunks)} searchable chunks!")
 
 # ---------------------------------------------------------
 # Main UI - Query Engine
@@ -224,30 +241,30 @@ st.header("🔍 Legal & Regulatory Query Engine")
 
 business_info = st.text_area(
     "Business Profile / Context:",
-    value="Restaurant/Café applying for outdoor seating permit in downtown district.",
-    height=100
+    value="Commercial restaurant/café applying for outdoor seating & signage permit.",
+    height=80
 )
 
 user_query = st.text_input(
-    "Query:",
-    value="What are the specific requirements and fees for an outdoor seating permit?"
+    "Query / Question:",
+    value="What permits, fees, and ADA sidewalk clearances are required?"
 )
 
-if st.button("🚀 Analyze Compliance"):
+if st.button("🚀 Analyze Compliance (PRO)"):
     if not st.session_state.vector_store:
         st.warning("⚠️ Please upload and process documents in the sidebar first!")
     elif not user_query.strip():
         st.warning("⚠️ Please enter a query.")
     else:
-        with st.spinner("Searching documents & generating compliance report..."):
+        with st.spinner("Searching documents & generating compliance analysis..."):
             try:
                 rag_chain = MunicipalRAGChain(st.session_state.vector_store, api_key=api_key)
                 output, sources = rag_chain.run_query(user_query, business_info)
 
-                st.subheader("📋 Compliance Analysis Output")
+                st.subheader("📋 Compliance Analysis Report")
                 st.markdown(output)
 
-                with st.expander("📌 View Retrieved Document Sources"):
+                with st.expander("📌 View Retrieved Source Chunks"):
                     for idx, src in enumerate(sources, 1):
                         st.markdown(f"**Source {idx}:** `{src['metadata']['document_name']}` (Page {src['metadata']['page_number']})")
                         st.info(src['content'])
